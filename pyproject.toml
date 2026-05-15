@@ -1,0 +1,15 @@
+[project]
+name = "optimuskg-neo4j-qa"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "neo4j>=5.28.4",
+    "numpy>=1.24.4",
+    "openai>=2.2.0",
+    "optimuskg>=1.0.0",
+    "pandas>=2.0.3",
+    "tqdm>=4.67.3",
+]
