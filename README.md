@@ -23,17 +23,23 @@ An optimized ingestion script designed to handle tens of millions of edges witho
 ### 4. Graph Auditing & Rule Mining (`cypher/`)
 Contains Cypher scripts to validate the ingested graph and discover structural meta-paths.
 
+#### Database Auditing
+We ran initial auditing queries (`cypher/audit_optimuskg.cypher`) to validate the taxonomy and size of our targeted extraction.
+
+![Node Counts](screenshots/node_counts.png)
+*(Above: Node taxonomy confirming the presence of Diseases, Genes, and Drugs)*
+
+![Relationship Counts](screenshots/relationship_counts.png)
+*(Above: Relationship distribution validating the immense edge density of the 13.4M edge subset)*
+
 #### Meta-Path Discovery
 By utilizing rule mining (`cypher/rule_mining.cypher`), we extracted the highest-frequency 2-hop meta-paths in the database. 
 
-![Rule Mining Meta-paths](assets/rule_mining_results.png)
+![Rule Mining Meta-paths](screenshots/rule_mining.png)
 *(Above: Discovering the most frequent paths, such as Drug -> Disease -> Gene)*
 
 #### Golden Path Drug Repurposing
 This structural discovery led to the **"Golden Path"** Cypher query, which successfully identifies existing drugs (like the blood pressure medication Telmisartan) that are indicated for Alzheimer's and maps them to their indirect genetic targets.
-
-![Golden Path Query Results](assets/golden_path_results.png)
-*(Above: Telmisartan's genetic target mapping through Alzheimer's disease)*
 
 ## 🛠️ Setup & Usage
 
