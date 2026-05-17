@@ -41,6 +41,15 @@ By utilizing rule mining (`cypher/rule_mining.cypher`), we extracted the highest
 #### Golden Path Drug Repurposing
 This structural discovery led to the **"Golden Path"** Cypher query, which successfully identifies existing drugs (like the blood pressure medication Telmisartan) that are indicated for Alzheimer's and maps them to their indirect genetic targets.
 
+### 5. Natural Language QA Agent (`nl_to_cypher.py`)
+A specialized GraphRAG (Retrieval-Augmented Generation) agent that translates plain English biomedical questions into complex Cypher queries.
+- Incorporates the exact OptimusKG schema and learned meta-paths into the LLM system prompt.
+- Dynamically traverses the graph to find hidden multi-hop insights (e.g., Drug -> Gene -> Disease paths).
+- Formats raw Neo4j results into readable, evidence-backed medical insights.
+
+![NL to Cypher Agent](screenshots/nl-to-cypher.png)
+*(Above: The agent autonomously discovering that Telmisartan targets PPARG, a gene associated with Alzheimer's disease)*
+
 ## 🛠️ Setup & Usage
 
 1. **Install Dependencies**
@@ -64,4 +73,10 @@ This structural discovery led to the **"Golden Path"** Cypher query, which succe
    
    # Ingest into Neo4j
    uv run python scripts/ingest_optimuskg.py
+   ```
+
+4. **Ask Questions (GraphRAG)**
+   ```bash
+   # Start the interactive QA agent
+   uv run python nl_to_cypher.py
    ```
