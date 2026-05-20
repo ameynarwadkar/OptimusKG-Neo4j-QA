@@ -6,3 +6,7 @@ data/
 extras/
 
 __pycache__/
+amie/
+outputs/
+
+.agents/

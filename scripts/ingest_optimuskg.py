@@ -117,7 +117,7 @@ def ingest_edges():
 
 def main():
     if not NEO4J_PASSWORD:
-        print("⚠️  WARNING: Missing NEO4J_PASSWORD in .env. The connection might fail!")
+        print("WARNING: Missing NEO4J_PASSWORD in .env. The connection might fail!")
     
     with driver.session(database=NEO4J_DATABASE) as session:
         session.execute_write(create_constraints)
