@@ -4,3 +4,5 @@
 data/
 .python-version
 extras/
+
+__pycache__/

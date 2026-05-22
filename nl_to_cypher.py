@@ -101,6 +101,7 @@ Rules:
 - Always include LIMIT 20 unless the user asks for counts.
 - Use DISTINCT where duplicates are likely.
 - Use toLower(toString(x.name)) CONTAINS "keyword" for name matching (always cast to string to avoid NaN errors).
+- ALWAYS return the entire node objects in the RETURN statement (e.g. `RETURN drug, disease, gene`). Do not return just strings like `drug.name`. We need the full node objects for graph visualization.
 - Do not make medical claims. Return graph-derived candidates/evidence only.
 """
 
@@ -196,14 +197,11 @@ The raw JSON results returned by the graph database are (limited to first 5):
 
 Please format the response strictly following this structure:
 
-Question:
-[The original question]
-
 Answer:
 [A clear natural language summary of the findings based on the provided rows]
 
-Evidence path:
-[Show the graph path using arrows, e.g. Drug X --TARGETS--> Gene G --ASSOCIATED_WITH--> Disease Y. If multiple paths exist, summarize or list a few clear examples.]
+<span style="color: #FFD700; font-weight: bold;">Evidence path:</span>
+<span style="color: #FFD700;">[Show the graph path using arrows, e.g. Drug X --TARGETS--> Gene G --ASSOCIATED_WITH--> Disease Y. If multiple paths exist, summarize or list a few clear examples.]</span>
 """
 
     completion = client.chat.completions.create(
