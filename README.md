@@ -41,14 +41,23 @@ By utilizing rule mining (`cypher/rule_mining.cypher`), we extracted the highest
 #### Golden Path Drug Repurposing
 This structural discovery led to the **"Golden Path"** Cypher query, which successfully identifies existing drugs (like the blood pressure medication Telmisartan) that are indicated for Alzheimer's and maps them to their indirect genetic targets.
 
-### 5. Natural Language QA Agent (`nl_to_cypher.py`)
-A specialized GraphRAG (Retrieval-Augmented Generation) agent that translates plain English biomedical questions into complex Cypher queries.
-- Incorporates the exact OptimusKG schema and learned meta-paths into the LLM system prompt.
-- Dynamically traverses the graph to find hidden multi-hop insights (e.g., Drug -> Gene -> Disease paths).
-- Formats raw Neo4j results into readable, evidence-backed medical insights.
+### 5. Natural Language QA Agent (`nl_to_cypher.py`, `app.py`)
+A **Neuro-Symbolic** GraphRAG agent that translates plain English biomedical questions into complex Cypher queries, with an AMIE-powered fallback for missing links.
+- Uses **Chain-of-Thought reasoning** (Grok) to map English terms precisely to the OptimusKG schema before generating Cypher.
+- Dynamically traverses the graph to find hidden multi-hop insights (e.g., Drug → Gene → Disease paths).
+- Formats raw Neo4j results into readable, evidence-backed medical insights with interactive graph visualizations.
+
+![Streamlit Demo](screenshots/streamlit-demo.png)
+*(Above: The Streamlit dashboard showing the interactive graph visualization and clinical summary)*
 
 ![NL to Cypher Agent](screenshots/nl-to-cypher.png)
 *(Above: The agent autonomously discovering that Telmisartan targets PPARG, a gene associated with Alzheimer's disease)*
+
+#### Rule-Augmented AI Fallback
+When the database returns no direct results, the system automatically checks AMIE's validated predictions and responds with the exact rule, confidence score, reasoning chain, and a live PubMed link — instead of saying "no results found."
+
+![Rule-Augmented Fallback](screenshots/rule-aug-feedback.png)
+*(Above: The fallback triggering for cyclin F — predicted via the Harm Principle (30.22% confidence) and validated by 19 PubMed papers)*
 
 ## 🛠️ Setup & Usage
 

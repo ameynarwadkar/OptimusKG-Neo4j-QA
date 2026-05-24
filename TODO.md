@@ -13,11 +13,10 @@
 - Increase `MAX_RULE_LENGTH` to 5 in `scripts/run_amie.py`.
 - **Goal:** Leverage the cluster's 128 cores and 64GB+ RAM to discover universal pharmacological rules across all diseases and drugs globally in the database.
 
-## 4. Relationship Ontology Cleanup (Redundancy Resolution)
-- **Goal:** Merge redundant relationship types before running rule mining to improve AMIE's precision and recall.
-- Map ontological relationships (`IS_A` $\rightarrow$ `PARENT`).
-- Group pharmacological down-regulators (`INHIBITOR`, `ANTAGONIST`, `BLOCKER`, etc. $\rightarrow$ `INHIBITOR`).
-- Group pharmacological up-regulators (`AGONIST`, `ACTIVATOR`, etc. $\rightarrow$ `ACTIVATOR`).
+## 4. Relationship Ontology Cleanup (Biological Embedding Clustering)
+- **Goal:** Resolve relationship redundancy (e.g., `IS_A` vs `PARENT`) without losing biological nuance (e.g., keeping `INHIBITOR` and `ANTAGONIST` distinct).
+- **Approach:** Use a biological embedding model (e.g., BioBERT, PubMedBERT) to embed the relationship types.
+- Perform semantic clustering on the embeddings to automatically merge true synonyms while preserving biologically distinct mechanisms.
 
 ## 5. Implement Neuro-Symbolic Hybrid Pipeline
 - Address AMIE's limitations (symbolic logic rigidity) by integrating Knowledge Graph Embeddings (KGEs) or Graph Neural Networks (GNNs).

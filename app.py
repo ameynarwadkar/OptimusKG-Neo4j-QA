@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 from pyvis.network import Network
 
 # pyrefly: ignore [missing-import]
-from nl_to_cypher import generate_cypher, run_cypher, format_answer_with_llm
+from nl_to_cypher import generate_cypher, run_cypher, format_answer_with_llm, check_ai_predictions
 
 st.set_page_config(layout="wide", page_title="OptimusKG QA Agent")
 
@@ -103,7 +103,10 @@ if prompt := st.chat_input("Ask a medical question... (e.g. What genes are targe
     with st.chat_message("assistant"):
         with st.spinner("Translating English to Cypher..."):
             try:
-                cypher = generate_cypher(prompt)
+                reasoning, cypher = generate_cypher(prompt)
+                if reasoning:
+                    with st.expander("Thinking..."):
+                        st.markdown(reasoning)
             except Exception as e:
                 st.error(f"Failed to generate Cypher: {e}")
                 st.stop()
@@ -116,10 +119,19 @@ if prompt := st.chat_input("Ask a medical question... (e.g. What genes are targe
                 st.stop()
                 
         if not rows:
-            response = "I couldn't find any results in the knowledge graph for that query."
-            st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.stop()
+            with st.spinner("Checking AI Neuro-Symbolic predictions..."):
+                fallback_answer = check_ai_predictions(prompt)
+                
+            if fallback_answer:
+                response = f"###RULE-AUGMENTED AI FALLBACK\n\n{fallback_answer}"
+                st.markdown(response, unsafe_allow_html=True)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.stop()
+            else:
+                response = "I couldn't find any results in the knowledge graph for that query, and there are no AI predictions for it."
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.stop()
             
         with st.spinner("Generating clinical summary..."):
             answer = format_answer_with_llm(prompt, cypher, rows)
