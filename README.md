@@ -1,91 +1,133 @@
-# OptimusKG Alzheimer's Subset for Neo4j
+# OptimusKG Neo4j QA — Neuro-Symbolic Biomedical Discovery Engine
 
-This project provides an automated, high-performance pipeline for extracting, analyzing, and ingesting a disease-specific subset (Alzheimer's) from the massive [OptimusKG](https://github.com/microsoft/OptimusKG) knowledge graph into a local Neo4j database. 
+A full end-to-end pipeline for extracting a disease-specific subgraph from [OptimusKG](https://github.com/microsoft/OptimusKG) (190K nodes, 21M edges across 65 biomedical databases), mining logical rules with AMIE, predicting novel drug-disease associations, validating them against PubMed, and surfacing them through a Neuro-Symbolic QA chatbot with Chain-of-Thought reasoning.
+
+---
 
 ## 🚀 The Pipeline
 
-### 1. Data Extraction & Filtering (`scripts/get_optimuskg.py`)
-Extracts a highly focused, 2-hop Alzheimer's neighborhood from the complete OptimusKG graph using **Polars** for extreme memory efficiency. 
-- Discovers nodes containing the "alzheimer" keyword hidden inside JSON properties.
-- Expands to 1st-hop context nodes.
-- Filters strictly by allowed 3-letter node types (`DIS`, `DRG`, `GEN`, etc.) while dynamically dropping noisy protein-protein interactions.
-- Outputs `data/alzheimer_nodes.csv` and `data/alzheimer_edges.csv`.
+### 1. Subgraph Extraction (`scripts/get_optimuskg.py`)
+Extracts a focused **1-hop induced subgraph** for Alzheimer's Disease from the full OptimusKG using **Polars** for memory efficiency.
+- Discovers nodes with "alzheimer" in any property field.
+- Expands to 1-hop neighbors, filters by allowed node types (`DIS`, `DRG`, `GEN`, etc.).
+- Removes protein-protein edges to reduce noise.
+- **Output:** `data/alzheimer_nodes.csv`, `data/alzheimer_edges.csv`
 
-### 2. Schema Inspection (`src/inspect_schema.py`)
-A fast CLI tool that safely parses the JSON properties of the OptimusKG nodes and edges to extract readable names and validate the taxonomy of the extracted subset.
+### 2. Neo4j Ingestion (`scripts/ingest_optimuskg.py`)
+Streams the CSVs into a local Neo4j database using optimized batched writes.
+- **Pandas chunking** prevents memory crashes on large files.
+- **`UNWIND` batching** — 10,000 rows per transaction (~100× faster than row-by-row).
+- Unique ID constraints for lightning-fast deduplication.
+- **Result:** ~10K nodes, **13.4M edges**, 32 relationship types in the `alzheimer` database.
 
-### 3. Mass Neo4j Ingestion (`scripts/ingest_optimuskg.py`)
-An optimized ingestion script designed to handle tens of millions of edges without memory crashes.
-- Uses **Pandas Chunking** to stream massive CSV files.
-- Implements **Neo4j `UNWIND` batching** to write 10,000 rows at a time (100x faster than traditional `iterrows()` approaches).
-- Automatically adds unique ID constraints for lightning-fast edge merging.
-
-### 4. Graph Auditing & Rule Mining (`cypher/`)
-Contains Cypher scripts to validate the ingested graph and discover structural meta-paths.
-
-#### Database Auditing
-We ran initial auditing queries (`cypher/audit_optimuskg.cypher`) to validate the taxonomy and size of our targeted extraction.
+### 3. Graph Auditing (`cypher/`)
+Cypher scripts to validate the ingested graph and discover structural meta-paths.
 
 ![Node Counts](screenshots/node_counts.png)
 *(Above: Node taxonomy confirming the presence of Diseases, Genes, and Drugs)*
 
 ![Relationship Counts](screenshots/relationship_counts.png)
-*(Above: Relationship distribution validating the immense edge density of the 13.4M edge subset)*
-
-#### Meta-Path Discovery
-By utilizing rule mining (`cypher/rule_mining.cypher`), we extracted the highest-frequency 2-hop meta-paths in the database. 
+*(Above: Relationship distribution across all 32 edge types)*
 
 ![Rule Mining Meta-paths](screenshots/rule_mining.png)
-*(Above: Discovering the most frequent paths, such as Drug -> Disease -> Gene)*
+*(Above: Highest-frequency 2-hop meta-paths — Drug → Disease → Gene)*
 
-#### Golden Path Drug Repurposing
-This structural discovery led to the **"Golden Path"** Cypher query, which successfully identifies existing drugs (like the blood pressure medication Telmisartan) that are indicated for Alzheimer's and maps them to their indirect genetic targets.
+### 4. AMIE Rule Mining (`scripts/export_for_amie.py`, `scripts/run_amie.py`)
+Exports the graph as a TSV of triples and runs [AMIE3](https://github.com/dig-team/amie) to mine logical Horn Rules under the **Open World Assumption**.
 
-### 5. Natural Language QA Agent (`nl_to_cypher.py`, `app.py`)
-A **Neuro-Symbolic** GraphRAG agent that translates plain English biomedical questions into complex Cypher queries, with an AMIE-powered fallback for missing links.
-- Uses **Chain-of-Thought reasoning** (Grok) to map English terms precisely to the OptimusKG schema before generating Cypher.
-- Dynamically traverses the graph to find hidden multi-hop insights (e.g., Drug → Gene → Disease paths).
-- Formats raw Neo4j results into readable, evidence-backed medical insights with interactive graph visualizations.
+**6 rules discovered.** Key examples:
+
+| Rule | Confidence | Name |
+|---|---|---|
+| `(?a PHENOTYPE_PRESENT ?f) ∧ (?f ASSOCIATED_WITH ?b) ⇒ (?a ASSOCIATED_WITH ?b)` | 99.99% | Phenotype Overlap |
+| `(?a CONTRAINDICATION ?b) ∧ (?b ASSOCIATED_WITH ?c) ⇒ (?a ASSOCIATED_WITH ?c)` | 30.22% | **Harm Principle** |
+
+### 5. Link Prediction (`scripts/predict_links.py`)
+Applies the 6 mined rules against the graph to find **edges that logically should exist but don't**.
+- **223 novel associations** predicted across all rules.
+
+### 6. PubMed Validation (`scripts/validate_predictions.py`)
+Cross-references each unique predicted target against the **PubMed API** (NCBI E-utilities).
+- **155 unique targets** queried.
+- **80/155 (>51%) confirmed** with at least 1 published paper.
+- Top result: **cyclin F** — predicted via the Harm Principle (ARIPIPRAZOLE pathway), confirmed by **19 PubMed papers**.
+
+### 7. Neuro-Symbolic QA Agent (`nl_to_cypher.py`, `app.py`)
+An interactive Streamlit chatbot combining symbolic graph retrieval with neural reasoning.
+
+**Normal path:** Chain-of-Thought reasoning (Grok) → Cypher → Neo4j → LLM summary + graph visualization.
+
+**Fallback path:** When Neo4j returns 0 rows, `check_ai_predictions()` cross-references AMIE validated predictions and returns:
+- The exact AMIE rule that predicted the link
+- Its confidence score
+- The intermediate reasoning chain
+- The PubMed hit count
+- A live PubMed search link
 
 ![Streamlit Demo](screenshots/streamlit-demo.png)
-*(Above: The Streamlit dashboard showing the interactive graph visualization and clinical summary)*
+*(Above: The Streamlit dashboard with interactive graph visualization)*
 
 ![NL to Cypher Agent](screenshots/nl-to-cypher.png)
-*(Above: The agent autonomously discovering that Telmisartan targets PPARG, a gene associated with Alzheimer's disease)*
-
-#### Rule-Augmented AI Fallback
-When the database returns no direct results, the system automatically checks AMIE's validated predictions and responds with the exact rule, confidence score, reasoning chain, and a live PubMed link — instead of saying "no results found."
+*(Above: The agent discovering Telmisartan targets PPARG, a gene associated with Alzheimer's)*
 
 ![Rule-Augmented Fallback](screenshots/rule-aug-feedback.png)
-*(Above: The fallback triggering for cyclin F — predicted via the Harm Principle (30.22% confidence) and validated by 19 PubMed papers)*
+*(Above: Fallback triggered for cyclin F — Harm Principle, 30.22% confidence, 19 PubMed papers)*
+
+---
 
 ## 🛠️ Setup & Usage
 
-1. **Install Dependencies**
-   ```bash
-   uv sync
-   ```
+### 1. Install Dependencies
+```bash
+uv sync
+```
 
-2. **Environment Variables**
-   Create a `.env` file in the root directory:
-   ```env
-   NEO4J_URI=bolt://localhost:7687
-   NEO4J_USER=neo4j
-   NEO4J_PASSWORD=your_password
-   NEO4J_DATABASE=alzheimer
-   ```
+### 2. Environment Variables
+Create a `.env` file:
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=alzheimer
 
-3. **Run the Pipeline**
-   ```bash
-   # Extract the subset CSVs
-   uv run python scripts/get_optimuskg.py
-   
-   # Ingest into Neo4j
-   uv run python scripts/ingest_optimuskg.py
-   ```
+# Any OpenAI-compatible endpoint (Grok, Azure OpenAI, etc.)
+AZURE_OPENAI_API_KEY=your_key
+AZURE_OPENAI_ENDPOINT=your_endpoint
+AZURE_OPENAI_DEPLOYMENT=your_model_name
+```
 
-4. **Ask Questions (GraphRAG)**
-   ```bash
-   # Start the interactive QA agent
-   uv run python nl_to_cypher.py
-   ```
+### 3. Run the Pipeline
+```bash
+# Step 1: Extract Alzheimer's subgraph
+uv run python scripts/get_optimuskg.py
+
+# Step 2: Ingest into Neo4j
+uv run python scripts/ingest_optimuskg.py
+
+# Step 3: Export for AMIE and run rule mining
+uv run python scripts/export_for_amie.py
+uv run python scripts/run_amie.py
+
+# Step 4: Predict missing links
+uv run python scripts/predict_links.py
+
+# Step 5: Validate predictions against PubMed
+uv run python scripts/validate_predictions.py
+```
+
+### 4. Launch the QA Agent
+```bash
+# Streamlit UI
+uv run streamlit run app.py
+
+# CLI
+uv run python nl_to_cypher.py
+```
+
+---
+
+## 📖 Documentation
+
+See [`about.md`](about.md) for the full pipeline architecture, rule table, validation results breakdown by rule, live demo transcript, and known limitations.
+
+See [`TODO.md`](TODO.md) for the research roadmap including 2-hop Diabetes extraction, relationship ontology cleanup, and full-graph AMIE scaling on the university cluster.
