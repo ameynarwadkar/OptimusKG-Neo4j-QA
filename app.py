@@ -89,7 +89,12 @@ for message in st.session_state.messages:
         st.markdown(message["content"], unsafe_allow_html=True)
         if "cypher" in message:
             with st.expander("View Generated Cypher & Raw Data"):
-                st.code(message["cypher"], language="cypher")
+                if isinstance(message["cypher"], list):
+                    for i, q in enumerate(message["cypher"], 1):
+                        st.markdown(f"**Query {i}:**")
+                        st.code(q, language="cypher")
+                else:
+                    st.code(message["cypher"], language="cypher")
                 st.json(message["data"])
         if "html" in message and message["html"]:
             components.html(message["html"], height=460)
@@ -103,7 +108,7 @@ if prompt := st.chat_input("Ask a medical question... (e.g. What genes are targe
     with st.chat_message("assistant"):
         with st.spinner("Translating English to Cypher..."):
             try:
-                reasoning, cypher = generate_cypher(prompt)
+                reasoning, cyphers = generate_cypher(prompt)
                 if reasoning:
                     with st.expander("Thinking..."):
                         st.markdown(reasoning)
@@ -113,37 +118,44 @@ if prompt := st.chat_input("Ask a medical question... (e.g. What genes are targe
                 
         with st.spinner("Executing 13.4M edge graph traversal..."):
             try:
-                rows = run_cypher(cypher)
+                queries_and_results = []
+                all_rows = []
+                seen_rows = set()
+                for cypher in cyphers:
+                    rows = run_cypher(cypher)
+                    queries_and_results.append({"query": cypher, "results": rows})
+                    for row in rows:
+                        row_str = str(sorted(row.items()))
+                        if row_str not in seen_rows:
+                            seen_rows.add(row_str)
+                            all_rows.append(row)
             except Exception as e:
                 st.error(f"Database error: {e}")
                 st.stop()
                 
-        if not rows:
+        fallback_feedback = None
+        if not all_rows:
             with st.spinner("Checking AI Neuro-Symbolic predictions..."):
-                fallback_answer = check_ai_predictions(prompt)
-                
-            if fallback_answer:
-                response = f"###RULE-AUGMENTED AI FALLBACK\n\n{fallback_answer}"
-                st.markdown(response, unsafe_allow_html=True)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                st.stop()
-            else:
-                response = "I couldn't find any results in the knowledge graph for that query, and there are no AI predictions for it."
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                st.stop()
+                fallback_feedback = check_ai_predictions(prompt)
             
         with st.spinner("Generating clinical summary..."):
-            answer = format_answer_with_llm(prompt, cypher, rows)
+            answer = format_answer_with_llm(
+                prompt, 
+                cyphers, 
+                queries_and_results, 
+                fallback_feedback=fallback_feedback
+            )
             
         st.markdown(answer, unsafe_allow_html=True)
         
         with st.expander("View Generated Cypher & Raw Data"):
-            st.code(cypher, language="cypher")
-            st.json(rows[:5]) 
+            for i, cypher in enumerate(cyphers, start=1):
+                st.markdown(f"**Query {i}:**")
+                st.code(cypher, language="cypher")
+            st.json(all_rows[:5]) 
             
         # Draw PyVis Graph
-        html_data = parse_tabular_to_graph(rows)
+        html_data = parse_tabular_to_graph(all_rows)
         if html_data:
             st.markdown("### Interactive Graph")
             components.html(html_data, height=460)
@@ -152,7 +164,7 @@ if prompt := st.chat_input("Ask a medical question... (e.g. What genes are targe
         st.session_state.messages.append({
             "role": "assistant", 
             "content": answer,
-            "cypher": cypher,
-            "data": rows[:5],
+            "cypher": cyphers,
+            "data": all_rows[:5],
             "html": html_data
         })

@@ -1,8 +1,15 @@
 import os
 import re
+import sys
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from openai import OpenAI, AzureOpenAI
+
+# Force stdout/stderr to use UTF-8 on Windows to handle biomedical unicode symbols (e.g. arrows)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 load_dotenv()
 
@@ -77,15 +84,19 @@ Important query patterns:
 """
 
 SYSTEM_PROMPT = f"""
-You translate natural language biomedical questions into Neo4j Cypher.
+You translate natural language biomedical questions into one or more Neo4j Cypher queries.
 
 Use only this graph schema:
 
 {GRAPH_SCHEMA}
 
 Rules:
-- You MUST first explain your thought process and how you map the user's question to the graph schema inside a <reasoning> block.
-- After the reasoning block, output the Cypher query enclosed in ```cypher ... ``` block.
+- You MUST first analyze and explain your thought process inside a <reasoning> block:
+  1. Identify exactly what kind of answer the user is expecting (e.g. therapeutic targets, drug indications, contraindications, side effects, synergy interactions, etc.).
+  2. Plan the query strategy: identify which node types, relationship types, and properties are needed.
+  3. Decide if the question requires 1 or multiple Cypher queries (e.g. checking both direct associations and synergistic paths, or checking multiple target genes/drugs).
+- After the reasoning block, output the Cypher query (or queries) enclosed in ```cypher ... ``` blocks.
+- If multiple queries are needed, output each in its own ```cypher ... ``` block.
 - Generate only read-only queries.
 - Never use CREATE, MERGE, DELETE, SET, REMOVE, DROP, LOAD CSV, APOC, dbms procedures, or CALL.
 - Use MATCH, WITH, WHERE, RETURN, ORDER BY, and LIMIT only.
@@ -113,30 +124,35 @@ FORBIDDEN_PATTERNS = [
 ]
 
 
-def clean_cypher(raw_response: str) -> tuple[str, str]:
-    """Parses the LLM response to extract reasoning and the Cypher query."""
+def clean_cypher(raw_response: str) -> tuple[str, list[str]]:
+    """Parses the LLM response to extract reasoning and one or more Cypher queries."""
     reasoning = ""
-    cypher = raw_response
     
     # Extract reasoning if present (handles <reasoning> and Grok's native <think>)
     reasoning_match = re.search(r"<(reasoning|think)>(.*?)</\1>", raw_response, re.DOTALL | re.IGNORECASE)
     if reasoning_match:
         reasoning = reasoning_match.group(2).strip()
         
-    # Extract cypher block if present
-    cypher_match = re.search(r"```(?:cypher)?\s*(.*?)```", raw_response, re.DOTALL | re.IGNORECASE)
-    if cypher_match:
-        cypher = cypher_match.group(1).strip()
-    else:
+    # Extract all cypher blocks
+    cypher_blocks = re.findall(r"```(?:cypher)?\s*(.*?)```", raw_response, re.DOTALL | re.IGNORECASE)
+    cyphers = [block.strip() for block in cypher_blocks if block.strip()]
+    
+    if not cyphers:
         # Fallback if LLM forgets code blocks
-        cypher = re.sub(r"<(reasoning|think)>.*?</\1>", "", raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
+        temp = re.sub(r"<(reasoning|think)>.*?</\1>", "", raw_response, flags=re.DOTALL | re.IGNORECASE).strip()
         
-        # Aggressively hunt for the start of the query if it added conversational fluff
-        match_idx = re.search(r"^(MATCH|WITH)\b", cypher, re.IGNORECASE | re.MULTILINE)
-        if match_idx:
-            cypher = cypher[match_idx.start():].strip()
+        # Look for lines starting with MATCH or WITH
+        matches = list(re.finditer(r"^\s*(?:MATCH|WITH)\b", temp, re.IGNORECASE | re.MULTILINE))
+        if matches:
+            for i in range(len(matches)):
+                start = matches[i].start()
+                end = matches[i+1].start() if i + 1 < len(matches) else len(temp)
+                cyphers.append(temp[start:end].strip())
+        else:
+            if temp:
+                cyphers.append(temp)
             
-    return reasoning, cypher
+    return reasoning, cyphers
 
 
 def validate_cypher(cypher: str) -> bool:
@@ -162,7 +178,7 @@ def validate_cypher(cypher: str) -> bool:
     return True
 
 
-def generate_cypher(question: str) -> tuple[str, str]:
+def generate_cypher(question: str) -> tuple[str, list[str]]:
     completion = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -173,10 +189,11 @@ def generate_cypher(question: str) -> tuple[str, str]:
     )
 
     raw_response = completion.choices[0].message.content
-    reasoning, cypher = clean_cypher(raw_response)
-    validate_cypher(cypher)
+    reasoning, cyphers = clean_cypher(raw_response)
+    for cypher in cyphers:
+        validate_cypher(cypher)
 
-    return reasoning, cypher
+    return reasoning, cyphers
 
 
 def run_cypher(cypher: str):
@@ -197,22 +214,232 @@ def print_rows(rows):
             print(f"{key}: {value}")
 
 
-def format_answer_with_llm(question: str, cypher: str, rows: list) -> str:
+def get_pubmed_papers(query: str, limit: int = 2) -> list[dict]:
+    """
+    Searches PubMed for a query and retrieves details (title, journal, pubdate, pmid, authors) for the top papers.
+    """
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    import json
+    import time
+    
+    search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={urllib.parse.quote(query)}&retmax={limit}&retmode=json"
+    
+    # Try fetching search results with retries on 429
+    search_res = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                search_res = json.loads(response.read().decode())
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                time.sleep(0.5)
+                continue
+            print(f"HTTP Error {e.code} during search for query '{query}': {e}")
+            return []
+        except Exception as e:
+            print(f"Error searching PubMed for query '{query}': {e}")
+            return []
+            
+    if not search_res:
+        return []
+        
+    pmids = search_res.get("esearchresult", {}).get("idlist", [])
+    if not pmids:
+        return []
+        
+    ids_str = ",".join(pmids)
+    summary_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={ids_str}&retmode=json"
+    
+    # Try fetching summaries with retries on 429
+    summary_res = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(summary_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                summary_res = json.loads(response.read().decode())
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                time.sleep(0.5)
+                continue
+            print(f"HTTP Error {e.code} during summary fetch for query '{query}': {e}")
+            return []
+        except Exception as e:
+            print(f"Error fetching paper summaries for query '{query}': {e}")
+            return []
+            
+    if not summary_res:
+        return []
+        
+    results = summary_res.get("result", {})
+    papers = []
+    for pmid in pmids:
+        paper_info = results.get(pmid, {})
+        if paper_info:
+            authors = paper_info.get("authors", [])
+            author_str = ""
+            if authors:
+                author_str = authors[0].get("name", "")
+                if len(authors) > 1:
+                    author_str += " et al."
+            
+            title = paper_info.get("title", "")
+            if title.endswith("."):
+                title = title[:-1]
+                
+            papers.append({
+                "pmid": pmid,
+                "title": title,
+                "pubdate": paper_info.get("pubdate", ""),
+                "source": paper_info.get("source", ""),
+                "author": author_str,
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            })
+    return papers
+
+
+def get_relevant_pubmed_context(question: str, queries_and_results: list[dict]) -> str:
+    """
+    Identifies relevant entity pairs (from DB results or from predictions matching the question)
+    and fetches the top PubMed papers for each pair.
+    Returns a formatted string containing the actual publications to be used as context.
+    """
+    pairs = []
+    seen = set()
+    
+    # 1. Extract from DB query results (if any)
+    if queries_and_results:
+        for q_res in queries_and_results:
+            results = q_res.get("results", [])[:5] # limit to first 5 rows to be fast
+            for row in results:
+                nodes = []
+                for key, val in row.items():
+                    name = None
+                    if isinstance(val, dict):
+                        name = val.get("name")
+                    elif hasattr(val, "items"):
+                        name = dict(val).get("name")
+                    if name:
+                        nodes.append(name)
+                
+                # Pair them up
+                for i in range(len(nodes)):
+                    for j in range(i + 1, len(nodes)):
+                        pair = tuple(sorted([nodes[i], nodes[j]]))
+                        if pair not in seen:
+                            seen.add(pair)
+                            pairs.append(pair)
+                            
+    # 2. Extract from predictions matching the question (if DB results are empty)
+    else:
+        # Load validation predictions to see if any target/disease matches the question
+        import pandas as pd
+        valid_dfs = []
+        if os.path.exists("outputs"):
+            for file in os.listdir("outputs"):
+                path = os.path.join("outputs", file)
+                if file.endswith("validated_predictions.csv"):
+                    try:
+                        df = pd.read_csv(path)
+                        valid_dfs.append(df)
+                    except Exception:
+                        pass
+        if valid_dfs:
+            valid_df = pd.concat(valid_dfs)
+            q_lower = question.lower()
+            for _, r in valid_df.iterrows():
+                disease = r.get("Disease")
+                target = r.get("Target")
+                if disease and target:
+                    if target.lower() in q_lower or disease.lower() in q_lower:
+                        pair = tuple(sorted([disease, target]))
+                        if pair not in seen:
+                            seen.add(pair)
+                            pairs.append(pair)
+
+    # 3. If no pairs found yet, run a query-based search as fallback
+    if not pairs:
+        words = [w.strip("?,.()\"'") for w in question.split() if len(w) > 3 and w.lower() not in {"what", "treat", "cause", "relationship", "between", "does", "gene", "drug", "disease"}]
+        if len(words) >= 2:
+            pair = (words[0], words[1])
+            pairs.append(pair)
+            
+    # Limit to at most 4 pairs to avoid overloading NCBI and adding too much latency
+    pairs = pairs[:4]
+    
+    context_str = ""
+    for ent1, ent2 in pairs:
+        import time
+        time.sleep(0.35) # Polite sleep between API calls to avoid 429
+        query_term = f"{ent1} AND {ent2}"
+        papers = get_pubmed_papers(query_term, limit=2)
+        if papers:
+            context_str += f"Publications for '{ent1} AND {ent2}':\n"
+            for idx, paper in enumerate(papers, 1):
+                context_str += f"  {idx}. \"{paper['title']}\" - {paper['author']}, {paper['source']} ({paper['pubdate']}) - PMID: {paper['pmid']} (Link: {paper['url']})\n"
+            context_str += "\n"
+            
+    return context_str
+
+
+def format_answer_with_llm(question: str, cyphers: list[str], queries_and_results: list[dict], fallback_feedback: str = None) -> str:
+    # Prepare text representation of executed queries and results
+    retrieved_context = ""
+    if queries_and_results:
+        for idx, q_res in enumerate(queries_and_results, 1):
+            q = q_res["query"]
+            res = q_res["results"]
+            retrieved_context += f"Query {idx}:\n{q}\nResults (limited to first 5):\n{res[:5]}\n\n"
+    else:
+        retrieved_context = "No results returned from the database queries.\n"
+
+    fallback_context = ""
+    if fallback_feedback:
+        fallback_context = f"\nRule-Augmented Prediction Fallback Details:\n{fallback_feedback}\n"
+
+    # Fetch actual PubMed citations
+    pubmed_context = get_relevant_pubmed_context(question, queries_and_results)
+    if pubmed_context:
+        pubmed_section = f"\nActual PubMed Publications Context:\n{pubmed_context}\n"
+    else:
+        pubmed_section = ""
+
     prompt = f"""
 You are a biomedical expert interpreting results from an OptimusKG knowledge graph query.
 The user asked: "{question}"
-The Cypher query generated was:
-{cypher}
-The raw JSON results returned by the graph database are (limited to first 5):
-{rows[:5]}
 
-Please format the response strictly following this structure:
+The Cypher queries generated based on initial planning were:
+{cyphers}
 
-Answer:
-[A clear natural language summary of the findings based on the provided rows]
+Here is the context we retrieved:
+{retrieved_context}
+{fallback_context}
+{pubmed_section}
 
-<span style="color: #FFD700; font-weight: bold;">Evidence path:</span>
-<span style="color: #FFD700;">[Show the graph path using arrows, e.g. Drug X --TARGETS--> Gene G --ASSOCIATED_WITH--> Disease Y. If multiple paths exist, summarize or list a few clear examples.]</span>
+Please reason about "Expected vs. Retrieved" to evaluate these results, then format the response strictly following this structure:
+
+### EVALUATION & REASONING
+*   **User Expectation:** [A short description of what kind of answer the user expected, including node types, relationship types, and specific entities.]
+*   **Graph Retrieval Reality:** [What was actually found in the graph database or prediction fallback. Summarize node and relationship matches.]
+*   **Identified Gaps & Assumptions:** [Gaps between expectation and reality. Explain any assumptions made to bridge the gaps (e.g. mapping synonyms, using rules).]
+*   **Analytical Limitations:** [Note data sparseness, low prediction confidence, clinical qualifiers, or search limits.]
+
+### CLINICAL SUMMARY & ANSWER
+[A clear, structured, natural language summary of the findings, grounded strictly in the provided database rows, fallback predictions, and/or PubMed publications. Use bullet points or bold text to highlight key drug names, genes, or diseases.
+CRITICAL: For every key biomedical claim, drug-gene interaction, drug-disease indication, or contraindication you assert, you MUST cite the specific paper from the 'Actual PubMed Publications Context' if available.
+Format the citations as: `([FirstAuthor et al., Year, Journal](https://pubmed.ncbi.nlm.nih.gov/PMID))` using the PMID and link provided.
+If no specific paper is available in the 'Actual PubMed Publications Context' for a claim, you can fall back to a general search link: `([PubMed Search](https://pubmed.ncbi.nlm.nih.gov/?term=TERM1+AND+TERM2))` where spaces are replaced by `+`.]
+
+### EVIDENCE PATHS
+<div style="background-color: #1E1E1E; padding: 12px; border-radius: 8px; border-left: 4px solid #FFD700; font-family: monospace; color: #E0E0E0; margin-top: 10px;">
+[Show the graph path using text arrows and citations, e.g.:
+Drug X --TARGETS--> Gene G ([FirstAuthor et al., Year, Journal](https://pubmed.ncbi.nlm.nih.gov/PMID)) --ASSOCIATED_WITH--> Disease Y ([SecondAuthor et al., Year, Journal](https://pubmed.ncbi.nlm.nih.gov/PMID))
+If using fallback predictions, show the rule logic chain. If multiple paths exist, list them on separate lines.]
+</div>
 """
 
     completion = client.chat.completions.create(
@@ -238,6 +465,18 @@ def check_ai_predictions(question: str) -> str:
         "Rule 5 (Hierarchical Phenotype A)":            "65.55%",
         "Rule 6 (Hierarchical Phenotype B)":            "65.55%",
     }
+    
+    anyburl_path = os.path.join("outputs", "anyburl_discovered_rules_diabetes.csv")
+    if os.path.exists(anyburl_path):
+        try:
+            anyburl_df = pd.read_csv(anyburl_path)
+            for _, row in anyburl_df.iterrows():
+                rule = row.get("Rule")
+                conf = row.get("Confidence")
+                if pd.notna(rule) and pd.notna(conf):
+                    RULE_CONFIDENCE[rule] = f"{float(conf)*100:.2f}%"
+        except Exception:
+            pass
 
     valid_dfs = []
     novel_dfs = []
@@ -276,21 +515,30 @@ def check_ai_predictions(question: str) -> str:
             with open(file, "r", encoding="utf-8") as f:
                 rules_text += f"\n--- Rules from {file} ---\n" + f.read()
 
+    if os.path.exists(anyburl_path):
+        try:
+            anyburl_df = pd.read_csv(anyburl_path)
+            rules_text += f"\n--- Rules from {anyburl_path} ---\n"
+            for _, row in anyburl_df.iterrows():
+                rules_text += f"Rule: {row.get('Rule')}\nConfidence: {row.get('Confidence')}\n\n"
+        except Exception:
+            pass
+
     prompt = f"""
 You are a biomedical AI assistant. The Neo4j graph database did not contain a direct answer to the user's question.
-However, our AMIE-based Neuro-Symbolic pipeline has mathematically predicted missing links in the graph and validated them via PubMed.
+However, our Neuro-Symbolic pipeline (AMIE/AnyBURL) has mathematically predicted missing links in the graph and validated them via PubMed.
 
 User Question: "{question}"
 
-Here are the validated predictions (Disease, Target, PubMed hits, Rule that fired, AMIE Confidence, Reasoning chain):
+Here are the validated predictions (Disease, Target, PubMed hits, Rule that fired, Confidence, Reasoning chain):
 {context_csv}
 
-Here are the full logical rules AMIE discovered:
+Here are the full logical rules discovered:
 {rules_text}
 
 If the user's question is asking about a disease and target present in the predictions list, do the following:
-1. Explain that while the database is missing the link, our AMIE pipeline predicted it.
-2. State the EXACT Rule name and its AMIE confidence score from the data (e.g. "Rule 2 (Harm Principle via Contraindication) — 30.22% confidence").
+1. Explain that while the database is missing the link, our pipeline predicted it.
+2. State the EXACT Rule name and its confidence score from the data (e.g. "Rule 2 (Harm Principle via Contraindication) — 30.22% confidence").
 3. Briefly explain the logical reasoning chain from the Reason column (the intermediate path that led to the prediction).
 4. State the PubMed hit count as external validation.
 5. End with a clickable Markdown link: `[View PubMed Evidence](https://pubmed.ncbi.nlm.nih.gov/?term=<Disease>+AND+<Target>)` replacing spaces with `+`.
@@ -325,31 +573,47 @@ def main():
             continue
 
         try:
-            reasoning, cypher = generate_cypher(question)
+            reasoning, cyphers = generate_cypher(question)
 
             if reasoning:
                 print("\n Thinking...")
                 print(reasoning)
 
-            print("\nGenerated Cypher:")
-            print(cypher)
+            print(f"\nGenerated {len(cyphers)} Cypher queries:")
+            for i, cypher in enumerate(cyphers, start=1):
+                print(f"[{i}] {cypher}")
 
-            rows = run_cypher(cypher)
+            # Run all queries and collect results
+            queries_and_results = []
+            all_rows = []
+            seen_rows = set()
             
-            if not rows:
-                fallback_answer = check_ai_predictions(question)
-                if fallback_answer:
-                    print("\n" + "="*50)
-                    print("RULE-AUGMENTED AI FALLBACK TRIGGERED")
-                    print(fallback_answer)
-                    print("="*50)
-                else:
-                    print("\nNo results found in DB or AI Predictions.")
-            else:
-                print("\n" + "="*50)
-                formatted_response = format_answer_with_llm(question, cypher, rows)
-                print(formatted_response)
-                print("="*50)
+            for cypher in cyphers:
+                try:
+                    rows = run_cypher(cypher)
+                    queries_and_results.append({"query": cypher, "results": rows})
+                    for row in rows:
+                        row_str = str(sorted(row.items()))
+                        if row_str not in seen_rows:
+                            seen_rows.add(row_str)
+                            all_rows.append(row)
+                except Exception as e:
+                    print(f"Error running query: {cypher}")
+                    print(e)
+
+            fallback_feedback = None
+            if not all_rows:
+                fallback_feedback = check_ai_predictions(question)
+
+            print("\n" + "="*50)
+            formatted_response = format_answer_with_llm(
+                question, 
+                cyphers, 
+                queries_and_results, 
+                fallback_feedback=fallback_feedback
+            )
+            print(formatted_response)
+            print("="*50)
 
         except Exception as e:
             print("\nError:")

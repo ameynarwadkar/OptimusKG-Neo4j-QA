@@ -9,3 +9,6 @@ __pycache__/
 amie/
 
 .agents/
+results/
+.understand-anything/
+outputs/

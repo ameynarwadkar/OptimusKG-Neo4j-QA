@@ -1,3 +1,41 @@
+# Novel Contribution / Real Research
+
+> **The problem:** The current pipeline uses someone else's KG (OptimusKG), someone else's algorithm (AMIE), and someone else's LLM. The engineering is solid, but the novelty is thin. The ideas below are what would make this *yours*.
+
+## 1. Two-Stage Neural→Symbolic Link Prediction (Main Contribution)
+
+Train a KGE model (RotatE/ComplEx via PyKEEN) for fast, fuzzy link prediction (high recall), then filter those predictions through AMIE's mined rules for hard-logic validation (high precision).
+
+- **Why it's novel:** Prior work either trains KGEs alone OR mines rules alone. A few papers jointly embed rules during training (KALE, RUGE), but nobody has done a two-stage "generate then filter" pipeline on a heterogeneous biomedical KG like OptimusKG, and nobody has measured how much symbolic filtering improves precision over the neural model alone.
+- **Your contribution:** The architecture + the empirical finding that symbolic filtering improves precision on biomedical link prediction without destroying recall.
+- **Concrete deliverable:** Train RotatE via PyKEEN → predict top-N links → filter with AMIE rules → compare precision/recall/MRR against RotatE-alone and AMIE-alone. Three bars on a chart. That's a paper.
+
+## 2. Rule-Guided Negative Sampling for KGE Training (Enhancement to #1)
+
+Every KGE model uses **random negative sampling** — randomly corrupting triples by swapping head/tail with a random entity. Most random negatives are trivially easy, leading to weak training signal.
+
+- **The idea:** Use AMIE's mined rules to generate **hard negatives** — triples that *almost* satisfy a discovered rule but violate exactly one condition. E.g., if AMIE discovered `(?a CONTRAINDICATION ?b) ∧ (?b ASSOCIATED_WITH ?c) ⇒ (?a ASSOCIATED_WITH ?c)`, generate a negative by finding `(a,b)` where CONTRAINDICATION holds, `(b,c)` where ASSOCIATED_WITH holds, but `(a,c)` is known to be FALSE.
+- **Why it's novel:** Rule-guided negative sampling for KGE training on biomedical KGs doesn't exist. The closest work is adversarial negative sampling (KBGAN), but that uses a GAN, not symbolic rules.
+- **Pairs with #1:** This improves the KGE training step inside the same pipeline, giving a two-contribution paper.
+
+## 3. LLM-as-Biological-Plausibility-Filter for Mined Rules
+
+AMIE mines rules purely from graph structure — it has no idea whether a rule makes biological sense. Some rules are structural artifacts with no pharmacological meaning.
+
+- **The idea:** After AMIE mines N rules, feed each rule to an LLM: *"This logical rule was mined from a biomedical KG. Assess its biological plausibility and explain why it would or wouldn't hold in pharmacology."* Use the LLM's assessment to filter out structurally valid but biologically meaningless rules before prediction.
+- **Why it's novel:** Nobody has used LLMs to post-filter symbolic rule miners for biological validity. It's a genuine neuro-symbolic loop: symbolic mining → neural validation → symbolic prediction.
+- **Caveat:** Harder to evaluate rigorously — need a way to measure "plausibility" beyond LLM opinion.
+
+### Priority Ranking
+
+| Idea | Novelty | Feasibility | Paper Potential |
+|---|---|---|---|
+| **#1 KGE→AMIE two-stage** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Strong. Clear experiments. |
+| **#2 Rule-guided negatives** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Highest novelty, needs careful impl. |
+| **#3 LLM rule plausibility** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Novel but harder to evaluate. |
+
+---
+
 # Future Enhancements & TODOs
 
 ## 1. Extract 2-Hop Diabetes Subgraph from OptimusKG

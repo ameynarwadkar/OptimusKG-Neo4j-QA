@@ -11,7 +11,9 @@ dependencies = [
     "openai>=2.2.0",
     "optimuskg>=1.0.0",
     "pandas>=2.0.3",
+    "pykeen>=1.10.0",
     "pyvis>=0.3.2",
     "streamlit>=1.57.0",
+    "torch>=2.0.0",
     "tqdm>=4.67.3",
 ]
